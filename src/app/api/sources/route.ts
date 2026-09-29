@@ -6,6 +6,7 @@ import { writeAuditLog } from "@/lib/audit";
 import { encryptJson } from "@/lib/security";
 
 export const dynamic = "force-dynamic";
+const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
 export async function GET() {
   const user = await getCurrentUser();
@@ -110,6 +111,7 @@ export async function PATCH(request: Request) {
   }
   const id = typeof body.id === "string" ? body.id : "";
   if (!id) return Response.json({ error: "شناسه منبع لازم است." }, { status: 400 });
+  if (!UUID_PATTERN.test(id)) return Response.json({ error: "شناسه منبع معتبر نیست." }, { status: 400 });
   const changes: { active?: boolean; department?: string } = {};
   if (typeof body.active === "boolean") changes.active = body.active;
   if (typeof body.department === "string" && body.department.trim()) changes.department = body.department.trim().slice(0, 80);
@@ -137,6 +139,7 @@ export async function DELETE(request: Request) {
   if (actor.role !== "admin") return Response.json({ error: "فقط مدیر سیستم اجازه حذف منبع دارد." }, { status: 403 });
   const id = new URL(request.url).searchParams.get("id");
   if (!id) return Response.json({ error: "شناسه منبع لازم است." }, { status: 400 });
+  if (!UUID_PATTERN.test(id)) return Response.json({ error: "شناسه منبع معتبر نیست." }, { status: 400 });
   const [source] = await db.delete(dataSources).where(eq(dataSources.id, id)).returning({ id: dataSources.id, name: dataSources.name });
   if (!source) return Response.json({ error: "منبع پیدا نشد." }, { status: 404 });
   await writeAuditLog(actor.id, "source.deleted", { sourceId: source.id, name: source.name });

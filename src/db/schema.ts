@@ -45,7 +45,7 @@ export const sessions = pgTable(
     expiresAt: timestamp("expires_at", { withTimezone: true }).notNull(),
     createdAt: now(),
   },
-  (table) => [index("sessions_user_idx").on(table.userId)],
+  (table) => [index("sessions_user_idx").on(table.userId), index("sessions_expires_idx").on(table.expiresAt)],
 );
 
 export const dataSources = pgTable(
