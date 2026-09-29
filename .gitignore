@@ -1,0 +1,37 @@
+# dependencies
+/node_modules
+/.pnp
+.pnp.*
+
+# next.js
+/.next/
+/out/
+next-env.d.ts
+
+# production
+/build
+/dist
+
+# misc
+.DS_Store
+*.pem
+*.log
+npm-debug.log*
+.npm
+
+# env files — secrets must never enter the repository
+.env
+.env.*
+!.env.example
+
+# typescript
+*.tsbuildinfo
+tsconfig.tsbuildinfo
+
+# drizzle / local database artifacts
+.drizzle/
+
+# editor
+.vscode/
+.idea/
+.pgdata/

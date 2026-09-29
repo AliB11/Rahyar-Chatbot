@@ -26,5 +26,6 @@ export async function GET() {
       conversations: Number(conversationCount[0].total),
       users: Number(userCount[0].total),
     },
+    ragMode: process.env.OPENAI_API_KEY ? "hybrid" : "lexical",
   });
 }

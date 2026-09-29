@@ -63,7 +63,7 @@ type IconName =
   | "sparkles" | "chat" | "book" | "database" | "users" | "plus" | "search" | "menu"
   | "send" | "paperclip" | "shield" | "logout" | "arrow" | "close" | "file" | "globe"
   | "code" | "server" | "sync" | "trash" | "clock" | "check" | "lock" | "mail"
-  | "user" | "building" | "chevron" | "upload" | "alert" | "chart" | "key" | "spark";
+  | "user" | "building" | "chevron" | "upload" | "alert" | "chart" | "key" | "spark" | "copy";
 
 const departments = ["عمومی", "ستاد", "فناوری اطلاعات", "اعتبارات", "شعب", "خزانه‌داری", "مدیریت ریسک", "تطبیق و مبارزه با پولشویی"];
 
@@ -116,6 +116,7 @@ function Icon({ name, size = 19, className = "" }: { name: IconName; size?: numb
     chart: <><path d="M3 3v18h18M18 17V9M13 17V5M8 17v-3"/></>,
     key: <><circle cx="8" cy="15" r="5"/><path d="m21 2-9.6 9.6M15.5 7.5l3 3L21 8"/></>,
     spark: <><path d="m12 3 1.9 5.8L20 11l-6.1 2.2L12 19l-1.9-5.8L4 11l6.1-2.2L12 3Z"/></>,
+    copy: <><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></>,
   };
   return <svg className={className} width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">{shapes[name]}</svg>;
 }
@@ -135,6 +136,14 @@ function formatSize(bytes: number) {
 
 function initials(name: string) {
   return name.trim().split(/\s+/).slice(0, 2).map((part) => part[0]).join("") || "ر";
+}
+
+let localIdSequence = 0;
+function localMessageId(prefix: string) {
+  const uuid = globalThis.crypto?.randomUUID?.();
+  if (uuid) return `${prefix}-${uuid}`;
+  localIdSequence += 1;
+  return `${prefix}-${localIdSequence}`;
 }
 
 function MessageText({ text }: { text: string }) {
@@ -164,6 +173,9 @@ export default function AssistantDashboard() {
   const [page, setPage] = useState<NavPage>("chat");
   const [mobileNavOpen, setMobileNavOpen] = useState(false);
   const [stats, setStats] = useState<WorkspaceStats>({ documents: 0, sources: 0, conversations: 0, users: 0 });
+  const [ragMode, setRagMode] = useState<"hybrid" | "lexical">("lexical");
+  const [lastStrategy, setLastStrategy] = useState<string | null>(null);
+  const [copiedMessageId, setCopiedMessageId] = useState<string | null>(null);
   const [documents, setDocuments] = useState<KnowledgeDocument[]>([]);
   const [sources, setSources] = useState<DataSource[]>([]);
   const [managedUsers, setManagedUsers] = useState<ManagedUser[]>([]);
@@ -188,17 +200,20 @@ export default function AssistantDashboard() {
   const [busyIds, setBusyIds] = useState<string[]>([]);
   const messageEndRef = useRef<HTMLDivElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const textareaRef = useRef<HTMLTextAreaElement>(null);
   const toastTimeout = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const copiedTimeout = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const refreshWorkspace = useCallback(async (account: Account) => {
     try {
       const [dashboard, knowledge, sourceData, chatData] = await Promise.all([
-        requestJson<{ stats: WorkspaceStats }>("/api/dashboard"),
+        requestJson<{ stats: WorkspaceStats; ragMode: "hybrid" | "lexical" }>("/api/dashboard"),
         requestJson<{ documents: KnowledgeDocument[] }>("/api/documents"),
         requestJson<{ sources: DataSource[] }>("/api/sources"),
         requestJson<{ conversations: Conversation[] }>("/api/chat"),
       ]);
       setStats(dashboard.stats);
+      if (dashboard.ragMode) setRagMode(dashboard.ragMode);
       setDocuments(knowledge.documents);
       setSources(sourceData.sources);
       setConversations(chatData.conversations);
@@ -238,8 +253,33 @@ export default function AssistantDashboard() {
     messageEndRef.current?.scrollIntoView({ behavior: "smooth", block: "end" });
   }, [messages, sending]);
 
+  // میان‌بر «گفت‌وگوی جدید»: ⌘K / Ctrl+K (همان نشانگری که در کنار دکمه نمایش داده می‌شود)
+  useEffect(() => {
+    function onKeyDown(event: KeyboardEvent) {
+      if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === "k") {
+        event.preventDefault();
+        setConversationId(null);
+        setMessages([]);
+        setDraft("");
+        setPage("chat");
+        setMobileNavOpen(false);
+      }
+    }
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, []);
+
+  // رشد خودکار کادر پرسش متناسب با متن تایپشده
+  useEffect(() => {
+    const textarea = textareaRef.current;
+    if (!textarea) return;
+    textarea.style.height = "0px";
+    textarea.style.height = `${Math.min(textarea.scrollHeight, 125)}px`;
+  }, [draft]);
+
   useEffect(() => () => {
     if (toastTimeout.current) clearTimeout(toastTimeout.current);
+    if (copiedTimeout.current) clearTimeout(copiedTimeout.current);
   }, []);
 
   const notify = (message: string, kind: "success" | "error" = "success") => {
@@ -302,10 +342,11 @@ export default function AssistantDashboard() {
   async function sendQuestion(value = draft) {
     const question = value.trim();
     if (!question || sending || !user) return;
-    setDraft("");
+    // فقط وقتی خودِ پیش‌نویس ارسال می‌شود آن را پاک کن؛ پیشنهادهای آماده نباید متن در حال نوشتن کاربر را از بین ببرند.
+    if (value === draft) setDraft("");
     setSending(true);
     const optimistic: ChatMessage = {
-      id: `local-${Date.now()}`,
+      id: localMessageId("local"),
       role: "user",
       content: question,
       citations: [],
@@ -316,9 +357,11 @@ export default function AssistantDashboard() {
       const data = await postJson("/api/chat", { question, conversationId }) as {
         conversationId: string;
         message: ChatMessage;
+        retrieval?: { strategy?: string };
       };
       setConversationId(data.conversationId);
       setMessages((current) => [...current, data.message]);
+      if (data.retrieval?.strategy) setLastStrategy(data.retrieval.strategy);
       const chatData = await requestJson<{ conversations: Conversation[] }>("/api/chat");
       setConversations(chatData.conversations);
       setStats((current) => ({ ...current, conversations: Math.max(current.conversations, chatData.conversations.length) }));
@@ -326,7 +369,7 @@ export default function AssistantDashboard() {
       const errorMessage = error instanceof Error ? error.message : "پاسخ‌گویی انجام نشد.";
       notify(errorMessage, "error");
       setMessages((current) => [...current, {
-        id: `error-${Date.now()}`,
+        id: localMessageId("error"),
         role: "assistant",
         content: "در پاسخ‌گویی مشکلی پیش آمد. اتصال را بررسی کنید و دوباره تلاش کنید.",
         citations: [],
@@ -340,6 +383,17 @@ export default function AssistantDashboard() {
   function submitChat(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     void sendQuestion();
+  }
+
+  async function copyMessage(message: ChatMessage) {
+    try {
+      await navigator.clipboard.writeText(message.content);
+      setCopiedMessageId(message.id);
+      if (copiedTimeout.current) clearTimeout(copiedTimeout.current);
+      copiedTimeout.current = setTimeout(() => setCopiedMessageId((current) => (current === message.id ? null : current)), 1800);
+    } catch {
+      notify("کپی متن پاسخ ممکن نشد.", "error");
+    }
   }
 
   async function uploadDocument() {
@@ -570,7 +624,7 @@ export default function AssistantDashboard() {
 
         <div className={`page-content ${page === "chat" ? "chat-page-content" : ""}`}>
           {page === "chat" && <>
-            <div className="chat-heading"><div><div className="eyebrow"><span className="heading-dot"/>{currentPage.eyebrow}</div><h1>{currentPage.title}<span className="title-spark"><Icon name="spark" size={21}/></span></h1><p>{currentPage.description}</p></div><div className="chat-heading-badge"><Icon name="lock" size={16}/><span>داده‌های شما محرمانه است</span></div></div>
+            <div className="chat-heading"><div><div className="eyebrow"><span className="heading-dot"/>{currentPage.eyebrow}</div><h1>{currentPage.title}<span className="title-spark"><Icon name="spark" size={21}/></span></h1><p>{currentPage.description}</p></div><div className="chat-heading-badge"><Icon name="lock" size={16}/><span>داده‌های شما محرمانه است</span>{lastStrategy && <><span className="badge-separator"/><span className="strategy-label">{lastStrategy === "hybrid" ? "بازیابی ترکیبی" : "بازیابی واژگانی فارسی"}</span></>}</div></div>
             <section className={`chat-stage ${messages.length ? "chat-stage-has-messages" : ""}`}>
               <div className="messages-scroll">
                 {messages.length === 0 ? <div className="welcome-state">
@@ -582,18 +636,18 @@ export default function AssistantDashboard() {
                   {stats.documents === 0 && <div className="empty-knowledge-notice"><Icon name="book" size={16}/> هنوز سندی در دسترس نیست؛ از مدیر سامانه بخواهید پایگاه دانش را تکمیل کند.</div>}
                 </div> : <div className="message-list">{messages.map((message) => <article className={`message-row ${message.role === "user" ? "message-user" : "message-assistant"}`} key={message.id}>
                   {message.role === "assistant" ? <div className="assistant-avatar"><Icon name="sparkles" size={17}/></div> : <div className="user-message-avatar">{initials(user.fullName)}</div>}
-                  <div className="message-main"><div className="message-meta"><strong>{message.role === "user" ? "شما" : "دستیار راهیار"}</strong><span>{formatDate(message.createdAt)}</span></div><div className={`message-bubble ${message.role === "user" ? "user-bubble" : "assistant-bubble"}`}><MessageText text={message.content}/></div>
+                  <div className="message-main"><div className="message-meta"><strong>{message.role === "user" ? "شما" : "دستیار راهیار"}</strong><span>{formatDate(message.createdAt)}</span>{message.role === "assistant" && <button type="button" className={`copy-message-button ${copiedMessageId === message.id ? "copied" : ""}`} onClick={() => void copyMessage(message)}><Icon name={copiedMessageId === message.id ? "check" : "copy"} size={12}/>{copiedMessageId === message.id ? "کپی شد" : "کپی پاسخ"}</button>}</div><div className={`message-bubble ${message.role === "user" ? "user-bubble" : "assistant-bubble"}`}><MessageText text={message.content}/></div>
                     {message.role === "assistant" && message.citations?.length > 0 && <div className="citation-section"><div className="citation-label"><Icon name="book" size={14}/> منابع استفاده‌شده <span>{message.citations.length.toLocaleString("fa-IR")}</span></div><div className="citation-list">{message.citations.map((citation, index) => <details key={`${message.id}-${citation.documentId}-${index}`} className="citation-card"><summary><span className="citation-number">{(index + 1).toLocaleString("fa-IR")}</span><span className="citation-title">{citation.title}</span><span className="citation-department">{citation.department}</span><Icon name="chevron" size={14} className="citation-chevron"/></summary><p>{citation.excerpt}</p><small><Icon name="file" size={13}/>{citation.fileName}</small></details>)}</div></div>}
                   </div>
                 </article>)}{sending && <div className="message-row message-assistant"><div className="assistant-avatar"><Icon name="sparkles" size={17}/></div><div className="message-main"><div className="message-meta"><strong>دستیار راهیار</strong><span>در حال جست‌وجو در منابع...</span></div><div className="typing-indicator"><i/><i/><i/><span>بازیابی و آماده‌سازی پاسخ مستند</span></div></div></div>}<div ref={messageEndRef}/></div>}
               </div>
-              <div className="composer-wrap"><form className="composer" onSubmit={submitChat}><textarea value={draft} onChange={(event) => setDraft(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter" && !event.shiftKey) { event.preventDefault(); void sendQuestion(); } }} placeholder="پرسش خود را درباره اسناد و رویه‌های بانکی بنویسید..." rows={1} aria-label="متن پرسش"/><div className="composer-bottom"><div className="composer-hint"><Icon name="shield" size={14}/><span>پاسخ فقط بر اساس اسناد مجاز واحد شما</span><span className="composer-separator">·</span><span>Enter برای ارسال</span></div><button className="send-button" type="submit" disabled={!draft.trim() || sending} aria-label="ارسال پرسش">{sending ? <span className="spinner spinner-white"/> : <><span>ارسال</span><Icon name="send" size={16}/></>}</button></div></form><div className="composer-disclaimer">پاسخ هوش مصنوعی ممکن است نیاز به بررسی سند اصلی داشته باشد.</div></div>
+              <div className="composer-wrap"><form className="composer" onSubmit={submitChat}><textarea ref={textareaRef} value={draft} onChange={(event) => setDraft(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter" && !event.shiftKey) { event.preventDefault(); void sendQuestion(); } }} placeholder="پرسش خود را درباره اسناد و رویه‌های بانکی بنویسید..." rows={1} aria-label="متن پرسش"/><div className="composer-bottom"><div className="composer-hint"><Icon name="shield" size={14}/><span>پاسخ فقط بر اساس اسناد مجاز واحد شما</span><span className="composer-separator">·</span><span>Enter برای ارسال</span></div><button className="send-button" type="submit" disabled={!draft.trim() || sending} aria-label="ارسال پرسش">{sending ? <span className="spinner spinner-white"/> : <><span>ارسال</span><Icon name="send" size={16}/></>}</button></div></form><div className="composer-disclaimer">پاسخ هوش مصنوعی ممکن است نیاز به بررسی سند اصلی داشته باشد.</div></div>
             </section>
           </>}
 
           {page === "knowledge" && <>
             <PageTitle eyebrow={currentPage.eyebrow} title={currentPage.title} description={currentPage.description} action={<span className="page-count-chip"><Icon name="file" size={15}/>{stats.documents.toLocaleString("fa-IR")} سند فعال</span>}/>
-            <div className="stats-grid"><div className="metric-card"><span className="metric-icon metric-green"><Icon name="book"/></span><div><small>سندهای در دسترس</small><strong>{stats.documents.toLocaleString("fa-IR")}</strong></div><span className="metric-note">متناسب با واحد شما</span></div><div className="metric-card"><span className="metric-icon metric-blue"><Icon name="database"/></span><div><small>منابع متصل</small><strong>{stats.sources.toLocaleString("fa-IR")}</strong></div><span className="metric-note">اتصال سازمانی</span></div><div className="metric-card"><span className="metric-icon metric-violet"><Icon name="sparkles"/></span><div><small>بازیابی فارسی</small><strong>{process.env.NEXT_PUBLIC_RAG_MODE === "hybrid" ? "ترکیبی" : "فعال"}</strong></div><span className="metric-note">قطعه‌بندی آگاه از متن</span></div></div>
+            <div className="stats-grid"><div className="metric-card"><span className="metric-icon metric-green"><Icon name="book"/></span><div><small>سندهای در دسترس</small><strong>{stats.documents.toLocaleString("fa-IR")}</strong></div><span className="metric-note">متناسب با واحد شما</span></div><div className="metric-card"><span className="metric-icon metric-blue"><Icon name="database"/></span><div><small>منابع متصل</small><strong>{stats.sources.toLocaleString("fa-IR")}</strong></div><span className="metric-note">اتصال سازمانی</span></div><div className="metric-card"><span className="metric-icon metric-violet"><Icon name="sparkles"/></span><div><small>بازیابی فارسی</small><strong>{ragMode === "hybrid" ? "ترکیبی" : "واژگانی"}</strong></div><span className="metric-note">قطعه‌بندی آگاه از متن</span></div></div>
             {user.role === "admin" ? <section className="panel upload-panel"><div className="panel-heading"><div><h2><span className="panel-heading-icon"><Icon name="upload" size={18}/></span>افزودن سند به پایگاه دانش</h2><p>فایل پس از استخراج متن، برای بازیابی و پاسخ‌گویی فارسی قطعه‌بندی می‌شود.</p></div><span className="admin-only-chip"><Icon name="shield" size={14}/> فقط مدیر</span></div><div className={`drop-zone ${dragging ? "drop-zone-active" : ""}`} onDragOver={(event) => { event.preventDefault(); setDragging(true); }} onDragLeave={() => setDragging(false)} onDrop={onFileDrop}><input ref={fileInputRef} className="visually-hidden" type="file" accept=".pdf,.docx,.xlsx,.xlsm,.csv,.tsv,.json,.txt,.md,.markdown,.html,.htm,.xml,.yaml,.yml,.log,.ini,.sql" onChange={(event) => setSelectedFile(event.target.files?.[0] ?? null)}/><div className="upload-cloud"><Icon name="upload" size={22}/></div><div className="drop-zone-copy"><strong>{selectedFile ? selectedFile.name : "فایل را اینجا رها کنید یا انتخاب کنید"}</strong><span>{selectedFile ? `${formatSize(selectedFile.size)} · آماده بارگذاری` : "PDF، Word، Excel، CSV، JSON، HTML و متن · حداکثر ۲۰ مگابایت"}</span></div><button type="button" className="outline-button" onClick={() => fileInputRef.current?.click()}>{selectedFile ? "تغییر فایل" : "انتخاب فایل"}</button></div><div className="upload-footer"><label className="inline-field"><span>دامنه دسترسی</span><select value={uploadDepartment} onChange={(event) => setUploadDepartment(event.target.value)}>{departments.map((department) => <option key={department}>{department}</option>)}</select><Icon name="chevron" size={14}/></label><div className="upload-actions"><span className="upload-note"><Icon name="lock" size={14}/> فایل خام ذخیره نمی‌شود؛ متن ایندکس می‌شود.</span><button type="button" className="primary-button" disabled={!selectedFile || uploading} onClick={() => void uploadDocument()}>{uploading ? <><span className="spinner spinner-white"/> در حال پردازش...</> : <><Icon name="upload" size={17}/> بارگذاری و ایندکس</>}</button></div></div></section> : <div className="notice-banner"><Icon name="lock" size={17}/><span>افزودن و مدیریت اسناد فقط برای مدیر سیستم فعال است.</span></div>}
             <section className="panel document-panel"><div className="panel-heading document-panel-heading"><div><h2>اسناد پایگاه دانش</h2><p>محتوای قابل بازیابی در گفت‌وگوهای شما</p></div><div className="document-search"><Icon name="search" size={17}/><input value={documentSearch} onChange={(event) => setDocumentSearch(event.target.value)} placeholder="جست‌وجوی عنوان سند..." aria-label="جست‌وجوی اسناد"/></div></div>{filteredDocuments.length === 0 ? <div className="empty-table"><span><Icon name="file" size={22}/></span><strong>{documents.length ? "سندی با این جست‌وجو پیدا نشد" : "هنوز سندی ثبت نشده است"}</strong><p>{documents.length ? "عبارت دیگری را جست‌وجو کنید." : "اسناد رسمی پس از بارگذاری مدیر در این بخش نمایش داده می‌شوند."}</p></div> : <div className="document-list">{filteredDocuments.map((document) => <div className="document-row" key={document.id}><div className="document-type-icon"><Icon name={document.sourceType === "upload" ? "file" : "database"} size={20}/></div><div className="document-primary"><strong>{document.title}</strong><span>{document.fileName}</span></div><span className="scope-chip"><Icon name="building" size={13}/>{document.department}</span><span className="document-format">{document.sourceType === "upload" ? document.fileName.split(".").pop()?.toUpperCase() : "منبع داده"}</span><span className="document-size">{formatSize(document.sizeBytes)}</span><span className="document-date"><Icon name="clock" size={14}/>{formatDate(document.createdAt)}</span>{user.role === "admin" && <button type="button" className="row-icon-button delete-row-button" title="حذف سند" onClick={() => void deleteDocument(document)}><Icon name="trash" size={16}/></button>}</div>)}</div>}</section>
           </>}
